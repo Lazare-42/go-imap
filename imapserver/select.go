@@ -60,8 +60,10 @@ func (c *Conn) handleSelect(tag string, dec *imapwire.Decoder, readOnly bool) er
 	if err := c.writeFlags(data.Flags); err != nil {
 		return err
 	}
-	if err := c.writePermanentFlags(data.PermanentFlags); err != nil {
-		return err
+	if data.PermanentFlags != nil {
+		if err := c.writePermanentFlags(data.PermanentFlags); err != nil {
+			return err
+		}
 	}
 	if data.List != nil {
 		if err := c.writeList(data.List); err != nil {

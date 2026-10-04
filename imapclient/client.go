@@ -863,6 +863,10 @@ func (c *Client) readResponseData(typ string) error {
 				if err != nil {
 					return err
 				}
+				if flags == nil {
+					// Keep an explicit empty list distinct from an omitted response.
+					flags = []imap.Flag{}
+				}
 
 				c.mutex.Lock()
 				if c.state == imap.ConnStateSelected {

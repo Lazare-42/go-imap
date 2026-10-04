@@ -39,7 +39,9 @@ type SeqMatchData struct {
 type SelectData struct {
 	// Flags defined for this mailbox
 	Flags []Flag
-	// Flags that the client can change permanently
+	// Flags that the client can change permanently. Nil means the server
+	// omitted PERMANENTFLAGS, so all flags can be changed permanently; an
+	// empty non-nil slice means none can.
 	PermanentFlags []Flag
 	// Number of messages in this mailbox (aka. "EXISTS")
 	NumMessages uint32
