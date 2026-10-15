@@ -524,6 +524,47 @@ func (dec *Decoder) ExpectMailbox(ptr *string) bool {
 	return dec.returnErr(err)
 }
 
+// ExpectMailboxLenient is like ExpectMailbox, but a mailbox name that fails
+// modified UTF-7 decoding does not poison the decoder for the rest of the
+// response stream. Some servers (observed on Exchange Online) allow a
+// mailbox name containing literal control characters, such as a
+// user-renamed folder ending in tab bytes, which modified UTF-7 has no valid
+// encoding for. ExpectMailbox's dec.returnErr(err) sets a sticky decoder
+// error that fails every subsequent read on this connection, including
+// every other, perfectly valid mailbox in the same LIST response — one bad
+// name must not take down the whole mailbox listing.
+//
+// Exactly one of three outcomes follows: (ok=true, skip=false) a usable
+// mailbox name is in *ptr; (ok=false, skip=false) the astring itself could
+// not be read — a real framing problem, the decoder's own error is set as
+// usual; (ok=false, skip=true) the astring was read fine but is not valid
+// modified UTF-7 — the decoder is left healthy and *ptr holds the raw,
+// as-received name for the caller to log, never to open a mailbox with. The
+// caller must still consume the remainder of the current line
+// (dec.DiscardLine) before continuing when skip is true, since mbox-
+// list-extended data may follow the mailbox name on the same response line.
+func (dec *Decoder) ExpectMailboxLenient(ptr *string) (ok, skip bool) {
+	var name string
+	if !dec.ExpectAString(&name) {
+		return false, false
+	}
+	if strings.EqualFold(name, "INBOX") {
+		*ptr = "INBOX"
+		return true, false
+	}
+	decoded, err := utf7.Decode(name)
+	if err != nil {
+		// *ptr gets the raw, as-received name for the caller to log. It must
+		// never be used to open the mailbox: re-encoding it would not
+		// reproduce these exact wire bytes for a name containing literal
+		// control characters, so the server would not recognize it.
+		*ptr = name
+		return false, true
+	}
+	*ptr = decoded
+	return true, false
+}
+
 func (dec *Decoder) ExpectUID(ptr *imap.UID) bool {
 	var num uint32
 	if !dec.ExpectNumber(&num) {

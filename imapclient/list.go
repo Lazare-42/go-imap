@@ -1,6 +1,7 @@
 package imapclient
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -9,6 +10,20 @@ import (
 	"github.com/emersion/go-imap/v2/internal"
 	"github.com/emersion/go-imap/v2/internal/imapwire"
 )
+
+// errSkippedMailboxName is returned by readList (never surfaced to callers
+// outside this file) when one LIST response's mailbox name could not be
+// decoded as modified UTF-7 and was skipped. It carries the raw, as-received
+// name for diagnostics only — it must never be used as a mailbox name to
+// open, since re-encoding it would not reproduce the original wire bytes for
+// a name containing literal control characters.
+type errSkippedMailboxName struct {
+	rawName string
+}
+
+func (e *errSkippedMailboxName) Error() string {
+	return fmt.Sprintf("mailbox name %q is not valid modified UTF-7, skipped", e.rawName)
+}
 
 func getSelectOpts(options *imap.ListOptions) []string {
 	if options == nil {
@@ -91,6 +106,19 @@ func (c *Client) List(ref, pattern string, options *imap.ListOptions) *ListComma
 
 func (c *Client) handleList() error {
 	data, err := readList(c.dec)
+	var skipped *errSkippedMailboxName
+	if errors.As(err, &skipped) {
+		if cmd, ok := c.findPendingCmdFunc(func(cmd command) bool {
+			_, ok := cmd.(*ListCommand)
+			return ok
+		}).(*ListCommand); ok {
+			cmd.skippedNames = append(cmd.skippedNames, skipped.rawName)
+		}
+		// Not a connection-level failure: the decoder stayed healthy and the
+		// rest of this one response line was already discarded by readList.
+		// Just move on to the next response.
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("in LIST: %w", err)
 	}
@@ -135,6 +163,27 @@ type ListCommand struct {
 
 	returnStatus bool
 	pendingData  *imap.ListData
+
+	// skippedNames holds the raw, as-received name of every mailbox this
+	// command encountered that could not be decoded as modified UTF-7 (e.g.
+	// a name containing literal control characters some servers allow).
+	// Appended only from the read goroutine, before this command completes;
+	// safe to read via SkippedNames after Close/Collect/Wait returns.
+	skippedNames []string
+}
+
+// SkippedNames returns the raw, as-received name of every mailbox this LIST
+// command encountered whose name failed modified UTF-7 decoding. These
+// mailboxes are not present in Collect's or Next's results: one invalid name
+// no longer fails the whole command, but a name this malformed cannot be
+// reliably re-encoded to open the mailbox either, so it is omitted rather
+// than guessed at. Only valid after the command has completed (Close,
+// Collect, or Wait has returned).
+//
+// The returned names are diagnostic only — log them (escaping control
+// characters), never pass one to Select/Examine/Status.
+func (cmd *ListCommand) SkippedNames() []string {
+	return cmd.skippedNames
 }
 
 // Next advances to the next mailbox.
@@ -189,7 +238,20 @@ func readList(dec *imapwire.Decoder) (*imap.ListData, error) {
 		return nil, err
 	}
 
-	if !dec.ExpectSP() || !dec.ExpectMailbox(&data.Mailbox) {
+	if !dec.ExpectSP() {
+		return nil, dec.Err()
+	}
+	ok, skip := dec.ExpectMailboxLenient(&data.Mailbox)
+	if skip {
+		rawName := data.Mailbox
+		// Discard the rest of the line, but not its trailing CRLF: the
+		// caller (readResponse) expects to consume that CRLF itself, the
+		// same way it would after any other response-data line.
+		var discard string
+		dec.Text(&discard)
+		return nil, &errSkippedMailboxName{rawName: rawName}
+	}
+	if !ok {
 		return nil, dec.Err()
 	}
 
